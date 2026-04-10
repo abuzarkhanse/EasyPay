@@ -38,10 +38,13 @@ def dashboard_kpis():
         "total_customers": int(total_customers),
         "total_investors": int(total_investors),
         "active_plans": int(active_plans),
+        "completed_plans": int(total_customers - active_plans),
+        "total_collected": float(round(total_discounts + outstanding, 2)),
         "outstanding": float(round(outstanding, 2)),
-        "total_discounts": float(round(total_discounts, 2)),
+        "outstanding": float(round(outstanding, 2)),
         "overdue_count": int(overdue),
         "upcoming_count": int(upcoming),
+        "this_month": float(round(total_discounts + outstanding, 2)),  # Placeholder
     }
 
 def monthly_collections(last_n_months: int = 12):

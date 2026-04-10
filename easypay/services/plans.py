@@ -1,6 +1,8 @@
 from __future__ import annotations
 from datetime import datetime
 from typing import Optional
+from decimal import Decimal, ROUND_HALF_UP
+
 from ..core.db import connect, fetch_all, fetch_one, exec_one, exec_many
 from ..core.dates import add_months
 
@@ -8,43 +10,145 @@ from ..core.dates import add_months
 # ==========================================================
 # COMPUTE PLAN AMOUNTS
 # ==========================================================
-def compute_amounts(
-    total_price: float,
-    advance: float,
-    profit_pct: float,
-    discount: float,
-    months: int
-) -> dict:
 
-    base = max(total_price - advance, 0.0)
-    profit = (base * profit_pct) / 100.0
+def _to_decimal(value) -> Decimal:
+    try:
+        return Decimal(str(value or 0))
+    except Exception:
+        return Decimal("0")
 
-    final_amount = round(base + profit, 2)
-    final_payable = round(max(final_amount - discount, 0.0), 2)
+
+def round_money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _split_installments(total: Decimal, months: int) -> list[float]:
+    """
+    Split total into equal monthly amounts while keeping final sum exact.
+    Example:
+        100 / 3 => [33.33, 33.33, 33.34]
+    """
+    if months <= 0:
+        months = 1
+
+    total = round_money(total)
+    base = (total / Decimal(str(months))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    amounts = [base for _ in range(months)]
+    current_sum = sum(amounts, Decimal("0.00"))
+    diff = round_money(total - current_sum)
+
+    if diff != Decimal("0.00"):
+        amounts[-1] = round_money(amounts[-1] + diff)
+
+    return [float(a) for a in amounts]
+
+
+def calculate_plan_values(
+    total_price,
+    advance_payment,
+    profit_percent,
+    months,
+    discount=0,
+    discount_mode="final",   # "final" or "principal"
+):
+    total_price = _to_decimal(total_price)
+    advance_payment = _to_decimal(advance_payment)
+    profit_percent = _to_decimal(profit_percent)
+    discount = _to_decimal(discount)
+    months = int(months or 1)
 
     if months <= 0:
-        raise ValueError("Months must be >= 1")
+        months = 1
 
-    per_month = round(final_payable / months, 2)
-    schedule = [per_month] * months
+    if total_price < 0:
+        total_price = Decimal("0")
+    if advance_payment < 0:
+        advance_payment = Decimal("0")
+    if discount < 0:
+        discount = Decimal("0")
 
-    # Adjust last installment for rounding difference
-    total_sched = round(sum(schedule), 2)
-    diff = round(final_payable - total_sched, 2)
-    schedule[-1] = round(schedule[-1] + diff, 2)
+    applied_discount = discount
+    adjusted_total_price = total_price
+
+    # ------------------------------------------------------
+    # Discount on Final Payment
+    # total - advance = remaining
+    # profit on remaining
+    # final payable = remaining + profit - discount
+    # ------------------------------------------------------
+    if discount_mode == "final":
+        remaining = total_price - advance_payment
+        if remaining < 0:
+            remaining = Decimal("0")
+
+        profit = (remaining * profit_percent) / Decimal("100")
+        profit = round_money(profit)
+
+        final_amount = round_money(remaining + profit)  # before discount
+        final_payable = round_money(final_amount - discount)
+
+        if final_payable < 0:
+            final_payable = Decimal("0")
+
+    # ------------------------------------------------------
+    # Discount on Principal
+    # principal = total - discount
+    # remaining = principal - advance
+    # profit on remaining
+    # final payable = remaining + profit
+    # ------------------------------------------------------
+    elif discount_mode == "principal":
+        adjusted_total_price = total_price - discount
+        if adjusted_total_price < 0:
+            adjusted_total_price = Decimal("0")
+
+        remaining = adjusted_total_price - advance_payment
+        if remaining < 0:
+            remaining = Decimal("0")
+
+        profit = (remaining * profit_percent) / Decimal("100")
+        profit = round_money(profit)
+
+        final_amount = round_money(remaining + profit)
+        final_payable = final_amount
+
+    else:
+        discount_mode = "final"
+
+        remaining = total_price - advance_payment
+        if remaining < 0:
+            remaining = Decimal("0")
+
+        profit = (remaining * profit_percent) / Decimal("100")
+        profit = round_money(profit)
+
+        final_amount = round_money(remaining + profit)
+        final_payable = round_money(final_amount - discount)
+
+        if final_payable < 0:
+            final_payable = Decimal("0")
+
+    monthly_amounts = _split_installments(final_payable, months)
 
     return {
-        "base": round(base, 2),
-        "profit": round(profit, 2),
-        "final_amount": final_amount,
-        "final_payable": final_payable,
-        "monthly_amounts": schedule,
+        "remaining": float(round_money(remaining)),
+        "profit": float(round_money(profit)),
+        "final_amount": float(round_money(final_amount)),   # before final discount
+        "final_before_discount": float(round_money(final_amount)),
+        "final_payable": float(round_money(final_payable)),
+        "monthly_payment": float(round_money(final_payable / Decimal(str(months)))),
+        "monthly_amounts": monthly_amounts,
+        "discount": float(round_money(applied_discount)),
+        "discount_mode": discount_mode,
+        "adjusted_total_price": float(round_money(adjusted_total_price)),
     }
 
 
 # ==========================================================
 # CREATE PLAN
 # ==========================================================
+
 def create_plan(
     customer_id: int,
     item_name: str,
@@ -55,37 +159,42 @@ def create_plan(
     start_date: str,
     discount: float = 0.0,
     investor_id: Optional[int] = None,
+    discount_mode: str = "final",
 ) -> int:
-
-    amounts = compute_amounts(
-        total_price,
-        advance_payment,
-        profit_pct,
-        discount,
-        months
+    amounts = calculate_plan_values(
+        total_price=total_price,
+        advance_payment=advance_payment,
+        profit_percent=profit_pct,
+        months=months,
+        discount=discount,
+        discount_mode=discount_mode,
     )
 
     conn = connect()
 
-    # Insert Plan
+    plan_number = "PLN-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
     exec_one(conn, """
-        INSERT INTO plans(
-            customer_id,
-            investor_id,
-            item_name,
-            total_price,
-            advance_payment,
-            profit_pct,
-            months,
-            start_date,
-            discount,
-            final_amount,
-            final_payable,
-            status,
-            created_at
-        )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+    INSERT INTO plans(
+        plan_number,
+        customer_id,
+        investor_id,
+        item_name,
+        total_price,
+        advance_payment,
+        profit_pct,
+        months,
+        start_date,
+        discount,
+        discount_mode,
+        final_amount,
+        final_payable,
+        status,
+        created_at
+    )
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
+        plan_number,
         customer_id,
         investor_id,
         item_name,
@@ -95,6 +204,7 @@ def create_plan(
         int(months),
         start_date,
         float(discount),
+        discount_mode,
         amounts["final_amount"],
         amounts["final_payable"],
         "active",
@@ -103,7 +213,7 @@ def create_plan(
 
     plan_id = fetch_one(conn, "SELECT last_insert_rowid() AS id")["id"]
 
-    # Create Installments
+    # Create installments
     rows = []
     for i in range(1, months + 1):
         due_date = add_months(start_date, i - 1)
@@ -139,6 +249,7 @@ def create_plan(
 # ==========================================================
 # LIST PLANS
 # ==========================================================
+
 def list_plans(q: str = ""):
     conn = connect()
 
@@ -173,6 +284,7 @@ def list_plans(q: str = ""):
 # ==========================================================
 # INSTALLMENTS FOR PLAN
 # ==========================================================
+
 def installments_for_plan(plan_id: int):
     conn = connect()
     rows = fetch_all(
@@ -187,6 +299,7 @@ def installments_for_plan(plan_id: int):
 # ==========================================================
 # OVERDUE / UPCOMING
 # ==========================================================
+
 def overdue_and_upcoming(from_date: str, to_date: str):
     conn = connect()
 
@@ -206,23 +319,15 @@ def overdue_and_upcoming(from_date: str, to_date: str):
 
 
 # ==========================================================
-# DELETE PLAN (PROPER VERSION)
+# DELETE PLAN
 # ==========================================================
+
 def delete_plan(plan_id: int) -> None:
     """
-    Proper delete.
-
-    Since your schema already uses:
-    FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
-
-    Deleting the plan automatically deletes:
-        installments
-        payments (via installments)
-        receipts (via payments)
-
-    So we ONLY delete from plans.
+    Since foreign keys already use ON DELETE CASCADE,
+    deleting the plan automatically removes related records.
     """
-
     with connect() as conn:
         conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
         conn.commit()
+        

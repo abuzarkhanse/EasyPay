@@ -1,38 +1,27 @@
-# Python
+# Virtual environment
+.venv/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Virtual environment
-.venv/
-venv/
-env/
-
-# Build folders
+# Build outputs
 build/
 dist/
+installer_output/
 
-# PyInstaller
-*.spec
-
-# Executables
-*.exe
-
-# Installer
-*.msi
-
-# Database
+# Local app data
+data/
 *.db
+*.sqlite
 *.sqlite3
 
-# IDE
-.vscode/
-.idea/
-
-# Logs
-*.log
-
-# OS
-Thumbs.db
+# OS / editor
 .DS_Store
+Thumbs.db
+
+# Generated receipts / backups if local
+receipts/
+backups/

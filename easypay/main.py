@@ -9,6 +9,7 @@ from easypay.services.users import ensure_admin_user
 from easypay.ui.style import APP_QSS
 from easypay.ui.login import LoginWindow
 from easypay.ui.main_window import MainWindow
+from easypay.core.db import init_db
 
 def run():
     ensure_dirs()

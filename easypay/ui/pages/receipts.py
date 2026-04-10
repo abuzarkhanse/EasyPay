@@ -1,26 +1,59 @@
 from __future__ import annotations
+
 import os
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QMessageBox
+
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QMessageBox,
+)
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from ...services.receipts import list_receipts
+
+from ...services.receipts import (
+    list_receipts,
+    completed_plans_for_receipts,
+    generate_receipt_pdf,
+    generate_final_completion_receipt,
+)
+
 
 class ReceiptsPage(QWidget):
     def __init__(self):
         super().__init__()
+
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
 
         header = QHBoxLayout()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search receipts (receipt no, customer, item)...")
+        self.search.setPlaceholderText("Search receipts (customer, item, receipt no, plan no)...")
+
         self.btn_open = QPushButton("Open PDF")
+        self.btn_generate = QPushButton("Generate Missing PDF")
+        self.btn_generate.setStyleSheet("background:#0f766e; color:white;")
+
         header.addWidget(self.search, 1)
+        header.addWidget(self.btn_generate)
         header.addWidget(self.btn_open)
         root.addLayout(header)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Receipt No","Customer","Item","PDF Path","Created At","Receipt ID"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels([
+            "Receipt Type",
+            "Receipt No / Plan No",
+            "Customer",
+            "Item",
+            "Amount",
+            "Date",
+            "PDF Path",
+            "Internal ID",
+        ])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -28,33 +61,150 @@ class ReceiptsPage(QWidget):
 
         self.search.textChanged.connect(self.refresh)
         self.btn_open.clicked.connect(self.open_pdf)
+        self.btn_generate.clicked.connect(self.generate_missing_pdf)
 
         self.refresh()
 
     def refresh(self):
-        rows = list_receipts(self.search.text())
-        self.table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
+        search_text = self.search.text().strip()
+
+        normal_receipts = list_receipts(search_text)
+        final_receipts = completed_plans_for_receipts(search_text)
+
+        all_rows = []
+
+        # Normal installment receipts
+        for row in normal_receipts:
+            all_rows.append({
+                "receipt_type": row.get("receipt_type", "Installment"),
+                "display_no": str(row.get("receipt_no", "")),
+                "customer_name": str(row.get("customer_name", "")),
+                "item_name": str(row.get("item_name", "")),
+                "amount": f"{float(row.get('amount', 0) or 0):.2f}",
+                "date": str(row.get("actual_payment_date") or row.get("created_at") or ""),
+                "pdf_path": str(row.get("pdf_path", "")),
+                "internal_id": str(row.get("id", "")),
+            })
+
+        # Final completion receipts
+        for row in final_receipts:
+            all_rows.append({
+                "receipt_type": row.get("receipt_type", "Final Completion"),
+                "display_no": str(row.get("plan_number") or f"PLAN-{row.get('plan_id')}"),
+                "customer_name": str(row.get("customer_name", "")),
+                "item_name": str(row.get("item_name", "")),
+                "amount": f"{float(row.get('final_payable', 0) or 0):.2f}",
+                "date": str(row.get("completion_date") or ""),
+                "pdf_path": str(row.get("pdf_path", "")),
+                "internal_id": f"PLAN:{row.get('plan_id', '')}",
+            })
+
+        # newest/highest id first where possible
+        def sort_key(x):
+            raw = x.get("internal_id", "")
+            if raw.startswith("PLAN:"):
+                try:
+                    return (1, int(raw.split(":", 1)[1]))
+                except Exception:
+                    return (1, 0)
+            try:
+                return (0, int(raw))
+            except Exception:
+                return (0, 0)
+
+        all_rows.sort(key=sort_key, reverse=True)
+
+        self.table.setRowCount(len(all_rows))
+
+        for r, row in enumerate(all_rows):
             vals = [
-                row["receipt_no"],
+                row["receipt_type"],
+                row["display_no"],
                 row["customer_name"],
                 row["item_name"],
+                row["amount"],
+                row["date"],
                 row["pdf_path"],
-                row["created_at"],
-                str(row["id"]),
+                row["internal_id"],
             ]
+
             for c, v in enumerate(vals):
-                it = QTableWidgetItem(v)
+                it = QTableWidgetItem(str(v))
                 it.setFlags(it.flags() ^ Qt.ItemIsEditable)
                 self.table.setItem(r, c, it)
 
-    def open_pdf(self):
-        sel = self.table.selectedItems()
-        if not sel:
+        self.table.resizeColumnsToContents()
+
+    def _selected_row_data(self):
+        row_index = self.table.currentRow()
+        if row_index < 0:
+            return None
+
+        return {
+            "receipt_type": self.table.item(row_index, 0).text(),
+            "display_no": self.table.item(row_index, 1).text(),
+            "customer_name": self.table.item(row_index, 2).text(),
+            "item_name": self.table.item(row_index, 3).text(),
+            "amount": self.table.item(row_index, 4).text(),
+            "date": self.table.item(row_index, 5).text(),
+            "pdf_path": self.table.item(row_index, 6).text(),
+            "internal_id": self.table.item(row_index, 7).text(),
+        }
+
+    def generate_missing_pdf(self):
+        selected = self._selected_row_data()
+        if not selected:
             QMessageBox.information(self, "Select", "Select a receipt row first.")
             return
-        path = self.table.item(self.table.currentRow(), 3).text()
-        if not os.path.exists(path):
-            QMessageBox.warning(self, "Missing", f"File not found:\n{path}")
+
+        try:
+            receipt_type = selected["receipt_type"]
+            internal_id = selected["internal_id"]
+
+            if receipt_type == "Installment":
+                payment_id = int(internal_id)
+                path = generate_receipt_pdf(payment_id)
+
+            elif receipt_type == "Final Completion":
+                if not internal_id.startswith("PLAN:"):
+                    raise ValueError("Invalid final receipt plan ID.")
+                plan_id = int(internal_id.split(":", 1)[1])
+                path = generate_final_completion_receipt(plan_id)
+
+            else:
+                raise ValueError("Unknown receipt type.")
+
+            self.refresh()
+
+            QMessageBox.information(
+                self,
+                "PDF Generated",
+                f"Receipt PDF generated successfully:\n\n{path}",
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Generate Failed", str(e))
+
+    def open_pdf(self):
+        selected = self._selected_row_data()
+        if not selected:
+            QMessageBox.information(self, "Select", "Select a receipt row first.")
             return
+
+        path = selected["pdf_path"]
+
+        if not os.path.exists(path):
+            ask = QMessageBox.question(
+                self,
+                "PDF Not Found",
+                "This receipt PDF does not exist yet.\n\nDo you want to generate it now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+
+            if ask == QMessageBox.Yes:
+                self.generate_missing_pdf()
+            return
+
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        

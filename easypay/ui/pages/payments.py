@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate
 
 from ...core.db import connect, fetch_all, fetch_one
-from ...services.payments import add_payment, edit_payment
+from ...services.payments import add_payment, edit_payment, is_plan_completed
 from ...services.receipts import generate_receipt_pdf
 
 
@@ -106,9 +106,9 @@ class PaymentsPage(QWidget):
         # Table
         self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels([
-            "Installment ID","Customer","Item","Inst #",
-            "Due Date","Amount Due","Amount Paid",
-            "Paid?","Plan ID","Last Payment ID"
+            "Installment ID", "Customer", "Item", "Inst #",
+            "Due Date", "Amount Due", "Amount Paid",
+            "Paid?", "Plan ID", "Last Payment ID"
         ])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -201,6 +201,30 @@ class PaymentsPage(QWidget):
         return row
 
     # ======================================================
+    def _show_payment_success_message(self, pdf: str, plan_id: int):
+        """
+        Show normal payment receipt message.
+        If the plan is now fully completed, add an extra completion note.
+        """
+        message = f"Receipt saved:\n{pdf}"
+
+        try:
+            if is_plan_completed(plan_id):
+                message += (
+                    "\n\nPlan fully completed."
+                    "\nFinal completion receipt is now available in Receipts page."
+                )
+        except Exception:
+            # Do not block payment success message if completion check fails
+            pass
+
+        QMessageBox.information(
+            self,
+            "Receipt Generated",
+            message
+        )
+
+    # ======================================================
     def pay(self):
         r = self._selected_row()
         if r is None:
@@ -210,6 +234,7 @@ class PaymentsPage(QWidget):
         installment_id = int(self.table.item(r, 0).text())
         amount_due = float(self.table.item(r, 5).text())
         amount_paid = float(self.table.item(r, 6).text())
+        plan_id = int(self.table.item(r, 8).text())
 
         remaining = max(amount_due - amount_paid, 0.0)
 
@@ -227,13 +252,8 @@ class PaymentsPage(QWidget):
 
                 pdf = generate_receipt_pdf(payment_id, company_name="EasyPay")
 
-                QMessageBox.information(
-                    self,
-                    "Receipt Generated",
-                    f"Receipt saved:\n{pdf}"
-                )
-
                 self.refresh()
+                self._show_payment_success_message(pdf, plan_id)
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
@@ -246,6 +266,7 @@ class PaymentsPage(QWidget):
             return
 
         last_payment_id_txt = self.table.item(r, 9).text().strip()
+        plan_id = int(self.table.item(r, 8).text())
 
         if not last_payment_id_txt:
             QMessageBox.information(self, "No payment", "No payment exists for this installment.")
@@ -281,13 +302,24 @@ class PaymentsPage(QWidget):
 
                 pdf = generate_receipt_pdf(payment_id, company_name="EasyPay")
 
+                self.refresh()
+
+                message = f"Updated receipt saved:\n{pdf}"
+                try:
+                    if is_plan_completed(plan_id):
+                        message += (
+                            "\n\nPlan fully completed."
+                            "\nFinal completion receipt is now available in Receipts page."
+                        )
+                except Exception:
+                    pass
+
                 QMessageBox.information(
                     self,
                     "Receipt Updated",
-                    f"Updated receipt saved:\n{pdf}"
+                    message
                 )
-
-                self.refresh()
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+                

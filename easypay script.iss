@@ -1,30 +1,20 @@
-#define MyAppName "EasyPay"
-#define MyAppVersion "1.0.0"
-#define MyAppPublisher "EasyPay Solutions"
-
 [Setup]
-AppId={{EASYPAY-APP-2026}}
-AppName={#MyAppName}
-AppVersion={#MyAppVersion}
-AppPublisher={#MyAppPublisher}
-DefaultDirName={pf}\EasyPay
+AppName=EasyPay
+AppVersion=1.0.2
+DefaultDirName={commonpf}\EasyPay
 DefaultGroupName=EasyPay
-OutputDir=.
-OutputBaseFilename=EasyPay_Setup_v1.0.0
+OutputDir=installer_output
+OutputBaseFilename=EasyPay_Setup_v1.0.2
 Compression=lzma
 SolidCompression=yes
-WizardStyle=modern
-PrivilegesRequired=admin
+SetupIconFile=assets\EasyPay.ico
 
 [Files]
-Source: "dist\EasyPay\*"; DestDir: "{app}"; Flags: recursesubdirs
+Source: "dist\EasyPay\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\EasyPay"; Filename: "{app}\EasyPay.exe"
 Name: "{commondesktop}\EasyPay"; Filename: "{app}\EasyPay.exe"
-
-[Dirs]
-Name: "{commonappdata}\EasyPay"; Permissions: users-full
 
 [Run]
 Filename: "{app}\EasyPay.exe"; Description: "Launch EasyPay"; Flags: nowait postinstall skipifsilent

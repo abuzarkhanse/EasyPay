@@ -17,17 +17,17 @@ def connect() -> sqlite3.Connection:
 
     conn = sqlite3.connect(
         DB_PATH,
-        timeout=10,  # wait up to 10 seconds before throwing lock error
+        timeout=10,
         check_same_thread=False
     )
 
     conn.row_factory = sqlite3.Row
 
-    # 🔥 Critical for stability
+    # Critical for stability
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")      # prevents most locking issues
-    conn.execute("PRAGMA synchronous = NORMAL;")    # safe + better performance
-    conn.execute("PRAGMA busy_timeout = 5000;")     # wait 5 seconds if locked
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
 
     return conn
 
@@ -57,6 +57,32 @@ def fetch_one(conn: sqlite3.Connection, sql: str, params: Tuple[Any, ...] = ()) 
 
 
 # ==========================================================
+# MIGRATIONS
+# ==========================================================
+
+def _column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table_name})")
+    columns = cur.fetchall()
+    return any(col["name"] == column_name for col in columns)
+
+
+def apply_migrations(conn: sqlite3.Connection) -> None:
+    """
+    Safe schema upgrades for old client databases.
+    """
+    # plans.discount_mode -> for:
+    # 1) discount on final payment
+    # 2) discount on principal
+    if not _column_exists(conn, "plans", "discount_mode"):
+        conn.execute("""
+            ALTER TABLE plans
+            ADD COLUMN discount_mode TEXT NOT NULL DEFAULT 'final'
+        """)
+
+    conn.commit()
+
+
+# ==========================================================
 # DATABASE INITIALIZATION
 # ==========================================================
 
@@ -64,27 +90,14 @@ def init_db() -> None:
     conn = connect()
 
     try:
-
         # ---------------- USERS ----------------
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS plans(
+        CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            plan_number TEXT UNIQUE NOT NULL,
-            customer_id INTEGER NOT NULL,
-            investor_id INTEGER,
-            item_name TEXT NOT NULL,
-            total_price REAL NOT NULL,
-            advance_payment REAL NOT NULL,
-            profit_pct REAL NOT NULL,
-            months INTEGER NOT NULL,
-            start_date TEXT NOT NULL,
-            discount REAL NOT NULL DEFAULT 0,
-            final_amount REAL NOT NULL,
-            final_payable REAL NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
-            FOREIGN KEY(investor_id) REFERENCES investors(id) ON DELETE SET NULL
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'admin',
+            created_at TEXT NOT NULL
         );
         """)
 
@@ -116,6 +129,7 @@ def init_db() -> None:
         conn.execute("""
         CREATE TABLE IF NOT EXISTS plans(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_number TEXT UNIQUE,
             customer_id INTEGER NOT NULL,
             investor_id INTEGER,
             item_name TEXT NOT NULL,
@@ -125,6 +139,7 @@ def init_db() -> None:
             months INTEGER NOT NULL,
             start_date TEXT NOT NULL,
             discount REAL NOT NULL DEFAULT 0,
+            discount_mode TEXT NOT NULL DEFAULT 'final',
             final_amount REAL NOT NULL,
             final_payable REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
@@ -185,5 +200,9 @@ def init_db() -> None:
 
         conn.commit()
 
+        # Apply schema updates for old databases
+        apply_migrations(conn)
+
     finally:
         conn.close()
+        
