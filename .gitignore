@@ -7,21 +7,27 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Build outputs
+# Build output
 build/
 dist/
 installer_output/
 
-# Local app data
+# Local data
 data/
 *.db
 *.sqlite
 *.sqlite3
 
-# OS / editor
+# Generated files
+receipts/
+backups/
+*.zip
+*.log
+
+# VS Code / OS
+.vscode/
 .DS_Store
 Thumbs.db
 
-# Generated receipts / backups if local
-receipts/
-backups/
+# Ignore the .env file if it exists
+.env

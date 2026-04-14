@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -9,7 +8,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.pagesizes import portrait
 
 from easypay.config import RECEIPTS_DIR
-from easypay.core.db import connect, fetch_one, fetch_all, exec_one
+from easypay.core.db import connect, fetch_one, fetch_all
 
 
 # ==========================================================
@@ -43,6 +42,28 @@ def _is_plan_completed(conn, plan_id: int) -> bool:
     paid_count = int(row["paid_count"] or 0)
 
     return total_count > 0 and total_count == paid_count
+
+
+def _resolve_profit_mode(plan: dict) -> str:
+    """
+    New field is profit_mode.
+    Fallback to old discount_mode for compatibility with older saved plans.
+    """
+    profit_mode = (plan.get("profit_mode") or "").strip().lower()
+    if profit_mode in {"total", "principal"}:
+        return profit_mode
+
+    legacy_discount_mode = (plan.get("discount_mode") or "").strip().lower()
+    if legacy_discount_mode == "final":
+        return "total"
+    if legacy_discount_mode == "principal":
+        return "principal"
+
+    return "principal"
+
+
+def _profit_mode_text(profit_mode: str) -> str:
+    return "Total Price" if profit_mode == "total" else "Principal (Total - Advance)"
 
 
 # ==========================================================
@@ -174,6 +195,7 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
             p.profit_pct,
             p.discount,
             p.discount_mode,
+            p.profit_mode,
             p.final_amount,
             p.final_payable,
             p.start_date,
@@ -266,15 +288,15 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
 
     elements.append(Paragraph("-" * 32, center))
 
-    discount_mode = plan.get("discount_mode") or "final"
-    discount_mode_text = "Final Payment" if discount_mode == "final" else "Principal"
+    profit_mode = _resolve_profit_mode(plan)
+    profit_mode_text = _profit_mode_text(profit_mode)
 
     summary_data = [
         ["Total Price", f"{float(plan['total_price']):,.2f}"],
         ["Advance", f"{float(plan['advance_payment']):,.2f}"],
         ["Profit %", f"{float(plan['profit_pct']):,.2f}"],
         ["Discount", f"{float(plan['discount']):,.2f}"],
-        ["Discount Type", discount_mode_text],
+        ["Profit Apply On", profit_mode_text],
         ["Final Amount", f"{float(plan['final_amount']):,.2f}"],
         ["Final Payable", f"{float(plan['final_payable']):,.2f}"],
         ["Installments", str(len(installments))],

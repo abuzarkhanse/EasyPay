@@ -50,7 +50,7 @@ def calculate_plan_values(
     profit_percent,
     months,
     discount=0,
-    discount_mode="final",   # "final" or "principal"
+    profit_mode="principal",   # "total" or "principal"
 ):
     total_price = _to_decimal(total_price)
     advance_payment = _to_decimal(advance_payment)
@@ -68,80 +68,40 @@ def calculate_plan_values(
     if discount < 0:
         discount = Decimal("0")
 
-    applied_discount = discount
-    adjusted_total_price = total_price
+    # Principal always means total - advance
+    principal = total_price - advance_payment
+    if principal < 0:
+        principal = Decimal("0")
 
-    # ------------------------------------------------------
-    # Discount on Final Payment
-    # total - advance = remaining
-    # profit on remaining
-    # final payable = remaining + profit - discount
-    # ------------------------------------------------------
-    if discount_mode == "final":
-        remaining = total_price - advance_payment
-        if remaining < 0:
-            remaining = Decimal("0")
-
-        profit = (remaining * profit_percent) / Decimal("100")
-        profit = round_money(profit)
-
-        final_amount = round_money(remaining + profit)  # before discount
-        final_payable = round_money(final_amount - discount)
-
-        if final_payable < 0:
-            final_payable = Decimal("0")
-
-    # ------------------------------------------------------
-    # Discount on Principal
-    # principal = total - discount
-    # remaining = principal - advance
-    # profit on remaining
-    # final payable = remaining + profit
-    # ------------------------------------------------------
-    elif discount_mode == "principal":
-        adjusted_total_price = total_price - discount
-        if adjusted_total_price < 0:
-            adjusted_total_price = Decimal("0")
-
-        remaining = adjusted_total_price - advance_payment
-        if remaining < 0:
-            remaining = Decimal("0")
-
-        profit = (remaining * profit_percent) / Decimal("100")
-        profit = round_money(profit)
-
-        final_amount = round_money(remaining + profit)
-        final_payable = final_amount
-
+    # Profit can apply on full total or on principal
+    if profit_mode == "total":
+        profit_base = total_price
     else:
-        discount_mode = "final"
+        profit_mode = "principal"
+        profit_base = principal
 
-        remaining = total_price - advance_payment
-        if remaining < 0:
-            remaining = Decimal("0")
+    profit = (profit_base * profit_percent) / Decimal("100")
+    profit = round_money(profit)
 
-        profit = (remaining * profit_percent) / Decimal("100")
-        profit = round_money(profit)
+    final_before_discount = round_money(principal + profit)
+    final_payable = round_money(final_before_discount - discount)
 
-        final_amount = round_money(remaining + profit)
-        final_payable = round_money(final_amount - discount)
-
-        if final_payable < 0:
-            final_payable = Decimal("0")
+    if final_payable < 0:
+        final_payable = Decimal("0")
 
     monthly_amounts = _split_installments(final_payable, months)
 
     return {
-        "remaining": float(round_money(remaining)),
+        "principal": float(round_money(principal)),
+        "profit_base": float(round_money(profit_base)),
         "profit": float(round_money(profit)),
-        "final_amount": float(round_money(final_amount)),   # before final discount
-        "final_before_discount": float(round_money(final_amount)),
+        "final_amount": float(round_money(final_before_discount)),
+        "final_before_discount": float(round_money(final_before_discount)),
         "final_payable": float(round_money(final_payable)),
         "monthly_payment": float(round_money(final_payable / Decimal(str(months)))),
         "monthly_amounts": monthly_amounts,
-        "discount": float(round_money(applied_discount)),
-        "discount_mode": discount_mode,
-        "adjusted_total_price": float(round_money(adjusted_total_price)),
+        "discount": float(round_money(discount)),
+        "profit_mode": profit_mode,
     }
 
 
@@ -159,7 +119,7 @@ def create_plan(
     start_date: str,
     discount: float = 0.0,
     investor_id: Optional[int] = None,
-    discount_mode: str = "final",
+    profit_mode: str = "principal",
 ) -> int:
     amounts = calculate_plan_values(
         total_price=total_price,
@@ -167,12 +127,15 @@ def create_plan(
         profit_percent=profit_pct,
         months=months,
         discount=discount,
-        discount_mode=discount_mode,
+        profit_mode=profit_mode,
     )
 
     conn = connect()
 
     plan_number = "PLN-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+    # legacy compatibility for older code that still reads discount_mode
+    legacy_discount_mode = "final" if profit_mode == "total" else "principal"
 
     exec_one(conn, """
     INSERT INTO plans(
@@ -187,12 +150,13 @@ def create_plan(
         start_date,
         discount,
         discount_mode,
+        profit_mode,
         final_amount,
         final_payable,
         status,
         created_at
     )
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         plan_number,
         customer_id,
@@ -204,7 +168,8 @@ def create_plan(
         int(months),
         start_date,
         float(discount),
-        discount_mode,
+        legacy_discount_mode,
+        profit_mode,
         amounts["final_amount"],
         amounts["final_payable"],
         "active",

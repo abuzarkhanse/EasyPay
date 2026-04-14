@@ -70,13 +70,16 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
     """
     Safe schema upgrades for old client databases.
     """
-    # plans.discount_mode -> for:
-    # 1) discount on final payment
-    # 2) discount on principal
     if not _column_exists(conn, "plans", "discount_mode"):
         conn.execute("""
             ALTER TABLE plans
             ADD COLUMN discount_mode TEXT NOT NULL DEFAULT 'final'
+        """)
+
+    if not _column_exists(conn, "plans", "profit_mode"):
+        conn.execute("""
+            ALTER TABLE plans
+            ADD COLUMN profit_mode TEXT NOT NULL DEFAULT 'principal'
         """)
 
     conn.commit()
@@ -140,6 +143,7 @@ def init_db() -> None:
             start_date TEXT NOT NULL,
             discount REAL NOT NULL DEFAULT 0,
             discount_mode TEXT NOT NULL DEFAULT 'final',
+            profit_mode TEXT NOT NULL DEFAULT 'principal',
             final_amount REAL NOT NULL,
             final_payable REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',

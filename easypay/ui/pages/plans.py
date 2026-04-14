@@ -55,6 +55,10 @@ class NewPlanDialog(QDialog):
         self.profit.setMaximum(1000)
         self.profit.setDecimals(2)
 
+        self.profit_mode = QComboBox()
+        self.profit_mode.addItem("Profit on Principal (Total - Advance)", "principal")
+        self.profit_mode.addItem("Profit on Total Price", "total")
+
         self.months = QSpinBox()
         self.months.setRange(1, 600)
         self.months.setValue(12)
@@ -64,11 +68,6 @@ class NewPlanDialog(QDialog):
         self.start.setDate(QDate.currentDate())
 
         self.use_discount = QCheckBox("Apply Discount")
-
-        self.discount_mode = QComboBox()
-        self.discount_mode.addItem("Discount on Final Payment", "final")
-        self.discount_mode.addItem("Discount on Principal", "principal")
-        self.discount_mode.setEnabled(False)
 
         self.discount = QDoubleSpinBox()
         self.discount.setMaximum(1e12)
@@ -84,11 +83,11 @@ class NewPlanDialog(QDialog):
         form.addRow("Total Price*", self.total)
         form.addRow("Advance Payment*", self.advance)
         form.addRow("Profit %*", self.profit)
+        form.addRow("Profit Apply On", self.profit_mode)
         form.addRow("Months*", self.months)
         form.addRow("Start Date*", self.start)
         form.addRow("Investor (optional)", self.investor)
         form.addRow(self.use_discount)
-        form.addRow("Discount Type", self.discount_mode)
         form.addRow("Discount", self.discount)
 
         layout.addLayout(form)
@@ -110,13 +109,12 @@ class NewPlanDialog(QDialog):
         for w in [self.total, self.advance, self.profit, self.months, self.discount]:
             w.valueChanged.connect(self._recalculate)
 
-        self.discount_mode.currentIndexChanged.connect(self._recalculate)
+        self.profit_mode.currentIndexChanged.connect(self._recalculate)
 
         self._recalculate()
 
     def _toggle_discount(self, checked: bool):
         self.discount.setEnabled(checked)
-        self.discount_mode.setEnabled(checked)
 
         if not checked:
             self.discount.setValue(0.0)
@@ -129,7 +127,7 @@ class NewPlanDialog(QDialog):
         profit_pct = self.profit.value()
         months = self.months.value()
         discount = self.discount.value() if self.use_discount.isChecked() else 0.0
-        discount_mode = self.discount_mode.currentData() if self.use_discount.isChecked() else "final"
+        profit_mode = self.profit_mode.currentData()
 
         calc = calculate_plan_values(
             total_price=total,
@@ -137,27 +135,22 @@ class NewPlanDialog(QDialog):
             profit_percent=profit_pct,
             months=months,
             discount=discount,
-            discount_mode=discount_mode,
+            profit_mode=profit_mode,
         )
 
-        mode_text = "Final Payment" if calc["discount_mode"] == "final" else "Principal"
+        mode_text = "Total Price" if calc["profit_mode"] == "total" else "Principal (Total - Advance)"
 
         preview_lines = [
             "<b>Calculation Preview</b><br><br>",
-        ]
-
-        if calc["discount_mode"] == "principal":
-            preview_lines.append(f"Adjusted Principal After Discount: {calc['adjusted_total_price']:.2f}<br>")
-
-        preview_lines.extend([
-            f"Remaining: {calc['remaining']:.2f}<br>",
+            f"Principal: {calc['principal']:.2f}<br>",
+            f"Profit Base: {calc['profit_base']:.2f}<br>",
             f"Profit: {calc['profit']:.2f}<br>",
             f"Final Before Discount: {calc['final_before_discount']:.2f}<br>",
             f"Discount: {calc['discount']:.2f}<br>",
-            f"Discount Mode: {mode_text}<br><br>",
+            f"Profit Apply On: {mode_text}<br><br>",
             f"<b>Final Payable: {calc['final_payable']:.2f}</b><br>",
             f"Monthly Payment: {calc['monthly_payment']:.2f}",
-        ])
+        ]
 
         self.preview.setText("".join(preview_lines))
 
@@ -176,6 +169,10 @@ class NewPlanDialog(QDialog):
 
         if self.advance.value() < 0:
             QMessageBox.warning(self, "Invalid Advance", "Advance payment cannot be negative.")
+            return
+
+        if self.advance.value() > self.total.value():
+            QMessageBox.warning(self, "Invalid Advance", "Advance payment cannot be greater than total price.")
             return
 
         if self.months.value() <= 0:
@@ -197,7 +194,7 @@ class NewPlanDialog(QDialog):
             "months": int(self.months.value()),
             "start_date": self.start.date().toString("yyyy-MM-dd"),
             "discount": float(self.discount.value()) if use_discount else 0.0,
-            "discount_mode": self.discount_mode.currentData() if use_discount else "final",
+            "profit_mode": self.profit_mode.currentData(),
         }
 
 
