@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from easypay.core.db import connect, fetch_one, exec_one
+from easypay.core.db import connect, fetch_one, fetch_all, exec_one
 
 
 # ==========================================================
-# HELPERS
+# BASIC HELPERS
 # ==========================================================
 def _get_installment(conn, installment_id: int):
     return fetch_one(conn, "SELECT * FROM installments WHERE id=?", (installment_id,))
@@ -14,6 +14,14 @@ def _get_installment(conn, installment_id: int):
 
 def _get_payment(conn, payment_id: int):
     return fetch_one(conn, "SELECT * FROM payments WHERE id=?", (payment_id,))
+
+
+def fetch_payment(payment_id: int):
+    conn = connect()
+    try:
+        return _get_payment(conn, payment_id)
+    finally:
+        conn.close()
 
 
 def _recalculate_installment_status(conn, installment_id: int) -> None:
@@ -51,6 +59,176 @@ def _remaining_for_installment(conn, installment_id: int) -> float:
         remaining = 0.0
 
     return remaining
+
+
+# ==========================================================
+# CUSTOMER-WISE PAYMENT DATA
+# ==========================================================
+def list_payment_customers(search: str = ""):
+    conn = connect()
+
+    try:
+        q = f"%{search.strip()}%"
+
+        rows = fetch_all(conn, """
+            SELECT
+                c.id AS customer_id,
+                c.full_name,
+                c.phone,
+                c.cnic,
+                COALESCE(plan_stats.total_plans, 0) AS total_plans,
+                COALESCE(plan_stats.total_final_payable, 0) AS total_final_payable,
+                COALESCE(inst_stats.total_installments, 0) AS total_installments,
+                COALESCE(inst_stats.paid_installments, 0) AS paid_installments,
+                COALESCE(inst_stats.unpaid_installments, 0) AS unpaid_installments,
+                COALESCE(inst_stats.total_paid, 0) AS total_paid
+            FROM customers c
+            LEFT JOIN (
+                SELECT
+                    p.customer_id,
+                    COUNT(*) AS total_plans,
+                    COALESCE(SUM(p.final_payable), 0) AS total_final_payable
+                FROM plans p
+                GROUP BY p.customer_id
+            ) plan_stats ON plan_stats.customer_id = c.id
+            LEFT JOIN (
+                SELECT
+                    p.customer_id,
+                    COUNT(ins.id) AS total_installments,
+                    SUM(CASE WHEN ins.is_paid = 1 THEN 1 ELSE 0 END) AS paid_installments,
+                    SUM(CASE WHEN ins.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_installments,
+                    COALESCE(SUM(ins.amount_paid), 0) AS total_paid
+                FROM plans p
+                JOIN installments ins ON ins.plan_id = p.id
+                GROUP BY p.customer_id
+            ) inst_stats ON inst_stats.customer_id = c.id
+            WHERE COALESCE(plan_stats.total_plans, 0) > 0
+              AND (
+                    c.full_name LIKE ?
+                    OR c.phone LIKE ?
+                    OR c.cnic LIKE ?
+                  )
+            ORDER BY c.full_name COLLATE NOCASE ASC
+        """, (q, q, q))
+
+        result = []
+        for row in rows:
+            row = dict(row)
+            total_final_payable = float(row.get("total_final_payable") or 0)
+            total_paid = float(row.get("total_paid") or 0)
+            remaining_amount = round(total_final_payable - total_paid, 2)
+            if remaining_amount < 0:
+                remaining_amount = 0.0
+
+            row["remaining_amount"] = remaining_amount
+            result.append(row)
+
+        return result
+
+    finally:
+        conn.close()
+
+
+def customer_payment_summary(customer_id: int):
+    conn = connect()
+
+    try:
+        row = fetch_one(conn, """
+            SELECT
+                c.id AS customer_id,
+                c.full_name,
+                c.phone,
+                c.cnic,
+                COALESCE(plan_stats.total_plans, 0) AS total_plans,
+                COALESCE(plan_stats.total_final_payable, 0) AS total_final_payable,
+                COALESCE(inst_stats.total_installments, 0) AS total_installments,
+                COALESCE(inst_stats.paid_installments, 0) AS paid_installments,
+                COALESCE(inst_stats.unpaid_installments, 0) AS unpaid_installments,
+                COALESCE(inst_stats.total_paid, 0) AS total_paid
+            FROM customers c
+            LEFT JOIN (
+                SELECT
+                    p.customer_id,
+                    COUNT(*) AS total_plans,
+                    COALESCE(SUM(p.final_payable), 0) AS total_final_payable
+                FROM plans p
+                GROUP BY p.customer_id
+            ) plan_stats ON plan_stats.customer_id = c.id
+            LEFT JOIN (
+                SELECT
+                    p.customer_id,
+                    COUNT(ins.id) AS total_installments,
+                    SUM(CASE WHEN ins.is_paid = 1 THEN 1 ELSE 0 END) AS paid_installments,
+                    SUM(CASE WHEN ins.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_installments,
+                    COALESCE(SUM(ins.amount_paid), 0) AS total_paid
+                FROM plans p
+                JOIN installments ins ON ins.plan_id = p.id
+                GROUP BY p.customer_id
+            ) inst_stats ON inst_stats.customer_id = c.id
+            WHERE c.id = ?
+        """, (customer_id,))
+
+        if not row:
+            return None
+
+        row = dict(row)
+        total_final_payable = float(row.get("total_final_payable") or 0)
+        total_paid = float(row.get("total_paid") or 0)
+        remaining_amount = round(total_final_payable - total_paid, 2)
+        if remaining_amount < 0:
+            remaining_amount = 0.0
+
+        row["remaining_amount"] = remaining_amount
+        return row
+
+    finally:
+        conn.close()
+
+
+def installments_for_customer(customer_id: int):
+    conn = connect()
+
+    try:
+        rows = fetch_all(conn, """
+            SELECT
+                ins.id AS installment_id,
+                p.id AS plan_id,
+                p.plan_number,
+                p.item_name,
+                ins.inst_no,
+                ins.due_date,
+                ins.amount_due,
+                ins.amount_paid,
+                CASE
+                    WHEN (ins.amount_due - ins.amount_paid) > 0
+                    THEN ROUND(ins.amount_due - ins.amount_paid, 2)
+                    ELSE 0
+                END AS remaining_amount,
+                ins.is_paid,
+                (
+                    SELECT id
+                    FROM payments
+                    WHERE installment_id = ins.id
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) AS last_payment_id,
+                (
+                    SELECT actual_payment_date
+                    FROM payments
+                    WHERE installment_id = ins.id
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) AS last_payment_date
+            FROM installments ins
+            JOIN plans p ON p.id = ins.plan_id
+            WHERE p.customer_id = ?
+            ORDER BY ins.is_paid ASC, ins.due_date ASC, p.id DESC, ins.inst_no ASC
+        """, (customer_id,))
+
+        return [dict(r) for r in rows]
+
+    finally:
+        conn.close()
 
 
 # ==========================================================
@@ -136,7 +314,6 @@ def edit_payment(
         if ins is None:
             raise ValueError("Installment missing")
 
-        # Remaining allowance excluding this payment
         other_payments_total = fetch_one(
             conn,
             """
@@ -193,6 +370,7 @@ def list_receipt_context(payment_id: int):
                    p.item_name,
                    p.discount,
                    p.discount_mode,
+                   p.profit_mode,
                    p.final_payable,
                    p.advance_payment,
                    c.full_name AS customer_name

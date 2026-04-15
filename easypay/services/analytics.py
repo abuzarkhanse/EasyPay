@@ -1,63 +1,134 @@
 from __future__ import annotations
-from datetime import date, datetime
+
+from datetime import date
 from ..core.db import connect, fetch_one, fetch_all
-from ..core.dates import today_iso, to_date
+
+
+def _month_key(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _last_n_month_labels(last_n_months: int) -> list[str]:
+    today = date.today()
+    y = today.year
+    m = today.month
+
+    labels = []
+    for _ in range(last_n_months):
+        labels.append(_month_key(y, m))
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+
+    labels.reverse()
+    return labels
+
 
 def dashboard_kpis():
     conn = connect()
-    total_customers = fetch_one(conn, "SELECT COUNT(*) AS c FROM customers")["c"]
-    total_investors = fetch_one(conn, "SELECT COUNT(*) AS c FROM investors")["c"]
-    active_plans = fetch_one(conn, "SELECT COUNT(*) AS c FROM plans WHERE status='active'")["c"]
-    total_discounts = fetch_one(conn, "SELECT COALESCE(SUM(discount),0) AS s FROM plans")["s"]
 
-    outstanding = fetch_one(conn, """
-        SELECT COALESCE(SUM(p.final_payable - paid.s),0) AS s
-        FROM plans p
-        LEFT JOIN (
-            SELECT ins.plan_id, COALESCE(SUM(ins.amount_paid),0) AS s
-            FROM installments ins
-            GROUP BY ins.plan_id
-        ) paid ON paid.plan_id = p.id
-        WHERE p.status='active'
-    """)["s"]
+    try:
+        total_customers = fetch_one(
+            conn,
+            "SELECT COUNT(*) AS c FROM customers"
+        )["c"] or 0
 
-    overdue = fetch_one(conn, """
-        SELECT COUNT(*) AS c
-        FROM installments ins
-        WHERE ins.is_paid=0 AND ins.due_date < ?
-    """, (today_iso(),))["c"]
+        total_investors = fetch_one(
+            conn,
+            "SELECT COUNT(*) AS c FROM investors"
+        )["c"] or 0
 
-    upcoming = fetch_one(conn, """
-        SELECT COUNT(*) AS c
-        FROM installments ins
-        WHERE ins.is_paid=0 AND ins.due_date >= ?
-    """, (today_iso(),))["c"]
+        total_plans = fetch_one(
+            conn,
+            "SELECT COUNT(*) AS c FROM plans"
+        )["c"] or 0
 
-    conn.close()
-    return {
-        "total_customers": int(total_customers),
-        "total_investors": int(total_investors),
-        "active_plans": int(active_plans),
-        "completed_plans": int(total_customers - active_plans),
-        "total_collected": float(round(total_discounts + outstanding, 2)),
-        "outstanding": float(round(outstanding, 2)),
-        "outstanding": float(round(outstanding, 2)),
-        "overdue_count": int(overdue),
-        "upcoming_count": int(upcoming),
-        "this_month": float(round(total_discounts + outstanding, 2)),  # Placeholder
-    }
+        completed_plans = fetch_one(conn, """
+            SELECT COUNT(*) AS c
+            FROM (
+                SELECT p.id
+                FROM plans p
+                JOIN installments ins ON ins.plan_id = p.id
+                GROUP BY p.id
+                HAVING COUNT(ins.id) > 0
+                   AND COUNT(ins.id) = SUM(CASE WHEN ins.is_paid = 1 THEN 1 ELSE 0 END)
+            ) t
+        """)["c"] or 0
+
+        active_plans = max(int(total_plans) - int(completed_plans), 0)
+
+        total_collected = fetch_one(
+            conn,
+            "SELECT COALESCE(SUM(amount), 0) AS s FROM payments"
+        )["s"] or 0
+
+        outstanding = fetch_one(conn, """
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN p.final_payable - COALESCE(paid.s, 0) > 0
+                    THEN p.final_payable - COALESCE(paid.s, 0)
+                    ELSE 0
+                END
+            ), 0) AS s
+            FROM plans p
+            LEFT JOIN (
+                SELECT ins.plan_id, COALESCE(SUM(ins.amount_paid), 0) AS s
+                FROM installments ins
+                GROUP BY ins.plan_id
+            ) paid ON paid.plan_id = p.id
+        """)["s"] or 0
+
+        overdue_count = fetch_one(conn, """
+            SELECT COUNT(*) AS c
+            FROM installments
+            WHERE is_paid = 0
+              AND due_date < ?
+        """, (date.today().isoformat(),))["c"] or 0
+
+        this_month = fetch_one(conn, """
+            SELECT COALESCE(SUM(amount), 0) AS s
+            FROM payments
+            WHERE SUBSTR(actual_payment_date, 1, 7) = ?
+        """, (date.today().strftime("%Y-%m"),))["s"] or 0
+
+        return {
+            "total_customers": int(total_customers),
+            "total_investors": int(total_investors),
+            "active_plans": int(active_plans),
+            "completed_plans": int(completed_plans),
+            "total_collected": round(float(total_collected), 2),
+            "outstanding": max(round(float(outstanding), 2), 0.0),
+            "overdue_count": int(overdue_count),
+            "this_month": round(float(this_month), 2),
+        }
+
+    finally:
+        conn.close()
+
 
 def monthly_collections(last_n_months: int = 12):
-    # Sum payments by month (based on actual_payment_date)
     conn = connect()
-    rows = fetch_all(conn, """
-        SELECT SUBSTR(actual_payment_date,1,7) AS ym, COALESCE(SUM(amount),0) AS total
-        FROM payments
-        GROUP BY ym
-        ORDER BY ym ASC
-    """)
-    conn.close()
-    # keep last_n_months
-    if len(rows) > last_n_months:
-        rows = rows[-last_n_months:]
-    return [(r["ym"], float(r["total"])) for r in rows]
+
+    try:
+        rows = fetch_all(conn, """
+            SELECT
+                SUBSTR(actual_payment_date, 1, 7) AS ym,
+                COALESCE(SUM(amount), 0) AS total
+            FROM payments
+            GROUP BY SUBSTR(actual_payment_date, 1, 7)
+            ORDER BY ym ASC
+        """)
+
+        db_map = {r["ym"]: float(r["total"] or 0) for r in rows}
+        labels = _last_n_month_labels(last_n_months)
+
+        result = []
+        for label in labels:
+            result.append((label, db_map.get(label, 0.0)))
+
+        return result
+
+    finally:
+        conn.close()
+        

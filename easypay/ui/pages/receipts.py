@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -32,11 +33,12 @@ class ReceiptsPage(QWidget):
 
         header = QHBoxLayout()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search receipts (customer, item, receipt no, plan no)...")
+        self.search.setPlaceholderText("Search receipts by customer, item, receipt no, or plan no...")
+
+        self.btn_generate = QPushButton("Generate PDF")
+        self.btn_generate.setStyleSheet("background:#0f766e; color:white;")
 
         self.btn_open = QPushButton("Open PDF")
-        self.btn_generate = QPushButton("Generate Missing PDF")
-        self.btn_generate.setStyleSheet("background:#0f766e; color:white;")
 
         header.addWidget(self.search, 1)
         header.addWidget(self.btn_generate)
@@ -51,19 +53,35 @@ class ReceiptsPage(QWidget):
             "Item",
             "Amount",
             "Date",
-            "PDF Path",
-            "Internal ID",
+            "PDF Status",
+            "Hidden ID",
         ])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
         root.addWidget(self.table, 1)
 
+        # hide internal ID column from user
+        self.table.setColumnHidden(7, True)
+
         self.search.textChanged.connect(self.refresh)
         self.btn_open.clicked.connect(self.open_pdf)
         self.btn_generate.clicked.connect(self.generate_missing_pdf)
+        self.table.doubleClicked.connect(lambda *_: self.open_pdf())
 
         self.refresh()
+
+    def _parse_date(self, value: str):
+        value = (value or "").strip()
+        if not value:
+            return datetime.min
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            try:
+                return datetime.strptime(value, "%Y-%m-%d")
+            except Exception:
+                return datetime.min
 
     def refresh(self):
         search_text = self.search.text().strip()
@@ -73,46 +91,35 @@ class ReceiptsPage(QWidget):
 
         all_rows = []
 
-        # Normal installment receipts
         for row in normal_receipts:
+            pdf_path = str(row.get("pdf_path", ""))
             all_rows.append({
                 "receipt_type": row.get("receipt_type", "Installment"),
                 "display_no": str(row.get("receipt_no", "")),
                 "customer_name": str(row.get("customer_name", "")),
                 "item_name": str(row.get("item_name", "")),
-                "amount": f"{float(row.get('amount', 0) or 0):.2f}",
+                "amount": f"{float(row.get('amount', 0) or 0):,.2f}",
                 "date": str(row.get("actual_payment_date") or row.get("created_at") or ""),
-                "pdf_path": str(row.get("pdf_path", "")),
+                "pdf_status": "Ready" if os.path.exists(pdf_path) else "Missing",
+                "pdf_path": pdf_path,
                 "internal_id": str(row.get("id", "")),
             })
 
-        # Final completion receipts
         for row in final_receipts:
+            pdf_path = str(row.get("pdf_path", ""))
             all_rows.append({
                 "receipt_type": row.get("receipt_type", "Final Completion"),
                 "display_no": str(row.get("plan_number") or f"PLAN-{row.get('plan_id')}"),
                 "customer_name": str(row.get("customer_name", "")),
                 "item_name": str(row.get("item_name", "")),
-                "amount": f"{float(row.get('final_payable', 0) or 0):.2f}",
+                "amount": f"{float(row.get('final_payable', 0) or 0):,.2f}",
                 "date": str(row.get("completion_date") or ""),
-                "pdf_path": str(row.get("pdf_path", "")),
+                "pdf_status": "Ready" if os.path.exists(pdf_path) else "Missing",
+                "pdf_path": pdf_path,
                 "internal_id": f"PLAN:{row.get('plan_id', '')}",
             })
 
-        # newest/highest id first where possible
-        def sort_key(x):
-            raw = x.get("internal_id", "")
-            if raw.startswith("PLAN:"):
-                try:
-                    return (1, int(raw.split(":", 1)[1]))
-                except Exception:
-                    return (1, 0)
-            try:
-                return (0, int(raw))
-            except Exception:
-                return (0, 0)
-
-        all_rows.sort(key=sort_key, reverse=True)
+        all_rows.sort(key=lambda x: self._parse_date(x["date"]), reverse=True)
 
         self.table.setRowCount(len(all_rows))
 
@@ -124,7 +131,7 @@ class ReceiptsPage(QWidget):
                 row["item_name"],
                 row["amount"],
                 row["date"],
-                row["pdf_path"],
+                row["pdf_status"],
                 row["internal_id"],
             ]
 
@@ -140,16 +147,33 @@ class ReceiptsPage(QWidget):
         if row_index < 0:
             return None
 
-        return {
-            "receipt_type": self.table.item(row_index, 0).text(),
-            "display_no": self.table.item(row_index, 1).text(),
-            "customer_name": self.table.item(row_index, 2).text(),
-            "item_name": self.table.item(row_index, 3).text(),
-            "amount": self.table.item(row_index, 4).text(),
-            "date": self.table.item(row_index, 5).text(),
-            "pdf_path": self.table.item(row_index, 6).text(),
-            "internal_id": self.table.item(row_index, 7).text(),
-        }
+        internal_id = self.table.item(row_index, 7).text()
+        receipt_type = self.table.item(row_index, 0).text()
+
+        search_text = self.search.text().strip()
+        normal_receipts = list_receipts(search_text)
+        final_receipts = completed_plans_for_receipts(search_text)
+
+        if receipt_type == "Installment":
+            for row in normal_receipts:
+                if str(row.get("id", "")) == internal_id:
+                    return {
+                        "receipt_type": "Installment",
+                        "pdf_path": str(row.get("pdf_path", "")),
+                        "internal_id": internal_id,
+                    }
+
+        elif receipt_type == "Final Completion":
+            for row in final_receipts:
+                expected = f"PLAN:{row.get('plan_id', '')}"
+                if expected == internal_id:
+                    return {
+                        "receipt_type": "Final Completion",
+                        "pdf_path": str(row.get("pdf_path", "")),
+                        "internal_id": internal_id,
+                    }
+
+        return None
 
     def generate_missing_pdf(self):
         selected = self._selected_row_data()
