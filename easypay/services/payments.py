@@ -35,8 +35,8 @@ def _recalculate_installment_status(conn, installment_id: int) -> None:
         (installment_id,)
     )["s"]
 
-    total_paid = round(float(total_paid), 2)
-    due = round(float(ins["amount_due"]), 2)
+    total_paid = round(float(total_paid or 0), 2)
+    due = round(float(ins["amount_due"] or 0), 2)
     is_paid = 1 if total_paid >= due - 0.0001 else 0
 
     exec_one(
@@ -51,14 +51,11 @@ def _remaining_for_installment(conn, installment_id: int) -> float:
     if ins is None:
         raise ValueError("Installment not found")
 
-    due = round(float(ins["amount_due"]), 2)
-    paid = round(float(ins["amount_paid"]), 2)
+    due = round(float(ins["amount_due"] or 0), 2)
+    paid = round(float(ins["amount_paid"] or 0), 2)
     remaining = round(due - paid, 2)
 
-    if remaining < 0:
-        remaining = 0.0
-
-    return remaining
+    return max(remaining, 0.0)
 
 
 # ==========================================================
@@ -81,7 +78,7 @@ def list_payment_customers(search: str = ""):
                 COALESCE(inst_stats.total_installments, 0) AS total_installments,
                 COALESCE(inst_stats.paid_installments, 0) AS paid_installments,
                 COALESCE(inst_stats.unpaid_installments, 0) AS unpaid_installments,
-                COALESCE(inst_stats.total_paid, 0) AS total_paid
+                COALESCE(payment_stats.total_paid, 0) AS total_paid
             FROM customers c
             LEFT JOIN (
                 SELECT
@@ -96,12 +93,20 @@ def list_payment_customers(search: str = ""):
                     p.customer_id,
                     COUNT(ins.id) AS total_installments,
                     SUM(CASE WHEN ins.is_paid = 1 THEN 1 ELSE 0 END) AS paid_installments,
-                    SUM(CASE WHEN ins.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_installments,
-                    COALESCE(SUM(ins.amount_paid), 0) AS total_paid
+                    SUM(CASE WHEN ins.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_installments
                 FROM plans p
                 JOIN installments ins ON ins.plan_id = p.id
                 GROUP BY p.customer_id
             ) inst_stats ON inst_stats.customer_id = c.id
+            LEFT JOIN (
+                SELECT
+                    p.customer_id,
+                    COALESCE(SUM(pay.amount), 0) AS total_paid
+                FROM plans p
+                JOIN installments ins ON ins.plan_id = p.id
+                LEFT JOIN payments pay ON pay.installment_id = ins.id
+                GROUP BY p.customer_id
+            ) payment_stats ON payment_stats.customer_id = c.id
             WHERE COALESCE(plan_stats.total_plans, 0) > 0
               AND (
                     c.full_name LIKE ?
@@ -116,11 +121,7 @@ def list_payment_customers(search: str = ""):
             row = dict(row)
             total_final_payable = float(row.get("total_final_payable") or 0)
             total_paid = float(row.get("total_paid") or 0)
-            remaining_amount = round(total_final_payable - total_paid, 2)
-            if remaining_amount < 0:
-                remaining_amount = 0.0
-
-            row["remaining_amount"] = remaining_amount
+            row["remaining_amount"] = max(round(total_final_payable - total_paid, 2), 0.0)
             result.append(row)
 
         return result
@@ -144,7 +145,7 @@ def customer_payment_summary(customer_id: int):
                 COALESCE(inst_stats.total_installments, 0) AS total_installments,
                 COALESCE(inst_stats.paid_installments, 0) AS paid_installments,
                 COALESCE(inst_stats.unpaid_installments, 0) AS unpaid_installments,
-                COALESCE(inst_stats.total_paid, 0) AS total_paid
+                COALESCE(payment_stats.total_paid, 0) AS total_paid
             FROM customers c
             LEFT JOIN (
                 SELECT
@@ -159,12 +160,20 @@ def customer_payment_summary(customer_id: int):
                     p.customer_id,
                     COUNT(ins.id) AS total_installments,
                     SUM(CASE WHEN ins.is_paid = 1 THEN 1 ELSE 0 END) AS paid_installments,
-                    SUM(CASE WHEN ins.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_installments,
-                    COALESCE(SUM(ins.amount_paid), 0) AS total_paid
+                    SUM(CASE WHEN ins.is_paid = 0 THEN 1 ELSE 0 END) AS unpaid_installments
                 FROM plans p
                 JOIN installments ins ON ins.plan_id = p.id
                 GROUP BY p.customer_id
             ) inst_stats ON inst_stats.customer_id = c.id
+            LEFT JOIN (
+                SELECT
+                    p.customer_id,
+                    COALESCE(SUM(pay.amount), 0) AS total_paid
+                FROM plans p
+                JOIN installments ins ON ins.plan_id = p.id
+                LEFT JOIN payments pay ON pay.installment_id = ins.id
+                GROUP BY p.customer_id
+            ) payment_stats ON payment_stats.customer_id = c.id
             WHERE c.id = ?
         """, (customer_id,))
 
@@ -174,11 +183,8 @@ def customer_payment_summary(customer_id: int):
         row = dict(row)
         total_final_payable = float(row.get("total_final_payable") or 0)
         total_paid = float(row.get("total_paid") or 0)
-        remaining_amount = round(total_final_payable - total_paid, 2)
-        if remaining_amount < 0:
-            remaining_amount = 0.0
+        row["remaining_amount"] = max(round(total_final_payable - total_paid, 2), 0.0)
 
-        row["remaining_amount"] = remaining_amount
         return row
 
     finally:
@@ -324,12 +330,9 @@ def edit_payment(
             (installment_id, payment_id)
         )["s"]
 
-        due = round(float(ins["amount_due"]), 2)
-        other_payments_total = round(float(other_payments_total), 2)
-        allowed_max = round(due - other_payments_total, 2)
-
-        if allowed_max < 0:
-            allowed_max = 0.0
+        due = round(float(ins["amount_due"] or 0), 2)
+        other_payments_total = round(float(other_payments_total or 0), 2)
+        allowed_max = max(round(due - other_payments_total, 2), 0.0)
 
         new_amount = round(float(new_amount), 2)
 
@@ -399,16 +402,14 @@ def remaining_balance_for_plan(plan_id: int) -> float:
             return 0.0
 
         paid = fetch_one(conn, """
-            SELECT COALESCE(SUM(amount_paid),0) AS s
-            FROM installments
-            WHERE plan_id=?
+            SELECT COALESCE(SUM(pay.amount), 0) AS s
+            FROM payments pay
+            JOIN installments ins ON ins.id = pay.installment_id
+            WHERE ins.plan_id = ?
         """, (plan_id,))["s"]
 
-        remaining = round(float(p["final_payable"]) - float(paid), 2)
-        if remaining < 0:
-            remaining = 0.0
-
-        return remaining
+        remaining = round(float(p["final_payable"]) - float(paid or 0), 2)
+        return max(remaining, 0.0)
 
     finally:
         conn.close()

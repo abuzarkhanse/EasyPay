@@ -45,10 +45,6 @@ def _is_plan_completed(conn, plan_id: int) -> bool:
 
 
 def _resolve_profit_mode(plan: dict) -> str:
-    """
-    New field is profit_mode.
-    Fallback to old discount_mode for compatibility with older saved plans.
-    """
     profit_mode = (plan.get("profit_mode") or "").strip().lower()
     if profit_mode in {"total", "principal"}:
         return profit_mode
@@ -67,33 +63,40 @@ def _profit_mode_text(profit_mode: str) -> str:
 
 
 # ==========================================================
-# PROFESSIONAL THERMAL RECEIPT (58mm)
+# INSTALLMENT RECEIPT
 # ==========================================================
 def generate_receipt_pdf(payment_id: int, company_name: str = "EasyPay") -> str:
     """
-    Creates a printable PDF receipt suitable for 58mm thermal printers.
-    Stores PDF in receipts folder.
+    Creates short printable receipt.
+    Remaining balance is calculated from full plan total paid, not only this installment.
     """
     conn = connect()
 
     row = fetch_one(conn, """
-        SELECT pay.id,
-               pay.actual_payment_date,
-               pay.amount,
-               pay.remarks,
-               ins.inst_no,
-               ins.due_date,
-               ins.amount_due,
-               ins.amount_paid,
-               p.id AS plan_id,
-               p.item_name,
-               p.final_payable,
-               c.full_name AS customer_name
+        SELECT
+            pay.id,
+            pay.actual_payment_date,
+            pay.amount,
+            pay.remarks,
+            ins.inst_no,
+            ins.due_date,
+            ins.amount_due,
+            ins.amount_paid,
+            p.id AS plan_id,
+            p.item_name,
+            p.final_payable,
+            c.full_name AS customer_name,
+            (
+                SELECT COALESCE(SUM(pay2.amount), 0)
+                FROM payments pay2
+                JOIN installments ins2 ON ins2.id = pay2.installment_id
+                WHERE ins2.plan_id = p.id
+            ) AS total_plan_paid
         FROM payments pay
         JOIN installments ins ON ins.id = pay.installment_id
         JOIN plans p ON p.id = ins.plan_id
         JOIN customers c ON c.id = p.customer_id
-        WHERE pay.id=?
+        WHERE pay.id = ?
     """, (payment_id,))
 
     conn.close()
@@ -106,7 +109,7 @@ def generate_receipt_pdf(payment_id: int, company_name: str = "EasyPay") -> str:
     _ensure_receipts_dir()
 
     width = 58 * mm
-    height = 220 * mm
+    height = 125 * mm
     pdf_path = Path(RECEIPTS_DIR) / f"receipt_{payment_id}.pdf"
 
     doc = SimpleDocTemplate(
@@ -114,60 +117,56 @@ def generate_receipt_pdf(payment_id: int, company_name: str = "EasyPay") -> str:
         pagesize=portrait((width, height)),
         leftMargin=4,
         rightMargin=4,
-        topMargin=8,
-        bottomMargin=8,
+        topMargin=6,
+        bottomMargin=6,
     )
 
     styles = getSampleStyleSheet()
-    center = ParagraphStyle(name="center", parent=styles["Normal"], alignment=1, fontSize=10)
-    normal = ParagraphStyle(name="normal", parent=styles["Normal"], fontSize=9)
+    center = ParagraphStyle(name="center", parent=styles["Normal"], alignment=1, fontSize=9.5)
+    normal = ParagraphStyle(name="normal", parent=styles["Normal"], fontSize=8.5)
 
     elements = []
 
     elements.append(Paragraph(f"<b>{company_name}</b>", center))
-    elements.append(Paragraph("Offline Installments Receipt", center))
-    elements.append(Spacer(1, 6))
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph("-" * 32, center))
 
     elements.append(Paragraph(f"Receipt #: {row['id']}", normal))
     elements.append(Paragraph(f"Paid Date: {row['actual_payment_date']}", normal))
-    elements.append(Spacer(1, 4))
+    elements.append(Spacer(1, 3))
 
     elements.append(Paragraph(f"Customer: {row['customer_name']}", normal))
     elements.append(Paragraph(f"Item/Plan: {row['item_name']}", normal))
-    elements.append(Spacer(1, 4))
-
     elements.append(Paragraph(f"Installment #: {row['inst_no']}", normal))
     elements.append(Paragraph(f"Due Date: {row['due_date']}", normal))
-    elements.append(Spacer(1, 6))
-
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph("-" * 32, center))
 
-    remaining = float(row["final_payable"]) - float(row["amount_paid"])
+    remaining = float(row["final_payable"]) - float(row["total_plan_paid"])
     if remaining < 0:
         remaining = 0.0
 
     data = [
         ["Amount Due", f"{float(row['amount_due']):,.2f}"],
         ["Amount Paid", f"{float(row['amount']):,.2f}"],
-        ["Remaining", f"{float(remaining):,.2f}"],
+        ["Remaining", f"{remaining:,.2f}"],
     ]
 
     tbl = Table(data, colWidths=[30 * mm, 22 * mm])
     tbl.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
     ]))
 
     elements.append(tbl)
-    elements.append(Spacer(1, 6))
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph("-" * 32, center))
 
     if row.get("remarks"):
         elements.append(Paragraph(f"Remarks: {row['remarks']}", normal))
-        elements.append(Spacer(1, 4))
+        elements.append(Spacer(1, 3))
 
     elements.append(Paragraph("Thank you!", center))
     elements.append(Paragraph("Please keep this receipt", center))
@@ -180,9 +179,6 @@ def generate_receipt_pdf(payment_id: int, company_name: str = "EasyPay") -> str:
 # FINAL COMPLETION RECEIPT
 # ==========================================================
 def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay") -> str:
-    """
-    Generate one final summary receipt when all installments are completed.
-    """
     conn = connect()
 
     plan = fetch_one(conn, """
@@ -217,12 +213,7 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
         raise ValueError("Final completion receipt can only be generated when all installments are fully paid.")
 
     installments = fetch_all(conn, """
-        SELECT
-            inst_no,
-            due_date,
-            amount_due,
-            amount_paid,
-            is_paid
+        SELECT inst_no, due_date, amount_due, amount_paid, is_paid
         FROM installments
         WHERE plan_id = ?
         ORDER BY inst_no
@@ -250,33 +241,32 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
     pdf_path = Path(RECEIPTS_DIR) / f"final_receipt_plan_{plan_id}_{safe_customer}.pdf"
 
     width = 58 * mm
-    height = 260 * mm
+    height = 170 * mm
 
     doc = SimpleDocTemplate(
         str(pdf_path),
         pagesize=portrait((width, height)),
         leftMargin=4,
         rightMargin=4,
-        topMargin=8,
-        bottomMargin=8,
+        topMargin=6,
+        bottomMargin=6,
     )
 
     styles = getSampleStyleSheet()
-    center = ParagraphStyle(name="center", parent=styles["Normal"], alignment=1, fontSize=10)
-    normal = ParagraphStyle(name="normal", parent=styles["Normal"], fontSize=8.5)
+    center = ParagraphStyle(name="center", parent=styles["Normal"], alignment=1, fontSize=9.5)
+    normal = ParagraphStyle(name="normal", parent=styles["Normal"], fontSize=8)
 
     elements = []
 
     elements.append(Paragraph(f"<b>{company_name}</b>", center))
     elements.append(Paragraph("Final Completion Receipt", center))
-    elements.append(Paragraph("Installment Plan Fully Paid", center))
-    elements.append(Spacer(1, 6))
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph("-" * 32, center))
 
     elements.append(Paragraph(f"Plan ID: {plan['id']}", normal))
     elements.append(Paragraph(f"Plan No: {plan.get('plan_number') or '-'}", normal))
     elements.append(Paragraph(f"Completion Date: {paid_summary.get('last_payment_date') or '-'}", normal))
-    elements.append(Spacer(1, 4))
+    elements.append(Spacer(1, 3))
 
     elements.append(Paragraph(f"Customer: {plan['customer_name']}", normal))
     if plan.get("customer_phone"):
@@ -284,8 +274,7 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
     if plan.get("customer_cnic"):
         elements.append(Paragraph(f"CNIC: {plan['customer_cnic']}", normal))
     elements.append(Paragraph(f"Item/Plan: {plan['item_name']}", normal))
-    elements.append(Spacer(1, 5))
-
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph("-" * 32, center))
 
     profit_mode = _resolve_profit_mode(plan)
@@ -296,11 +285,9 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
         ["Advance", f"{float(plan['advance_payment']):,.2f}"],
         ["Profit %", f"{float(plan['profit_pct']):,.2f}"],
         ["Discount", f"{float(plan['discount']):,.2f}"],
-        ["Profit Apply On", profit_mode_text],
-        ["Final Amount", f"{float(plan['final_amount']):,.2f}"],
+        ["Profit On", profit_mode_text],
         ["Final Payable", f"{float(plan['final_payable']):,.2f}"],
         ["Installments", str(len(installments))],
-        ["Payment Entries", str(int(paid_summary.get('total_payment_entries') or 0))],
         ["Total Paid", f"{float(paid_summary.get('total_paid') or 0):,.2f}"],
     ]
 
@@ -308,19 +295,16 @@ def generate_final_completion_receipt(plan_id: int, company_name: str = "EasyPay
     tbl.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
     ]))
     elements.append(tbl)
 
-    elements.append(Spacer(1, 6))
-    elements.append(Paragraph("-" * 32, center))
-    elements.append(Paragraph("<b>Completion Status: FULLY PAID</b>", center))
     elements.append(Spacer(1, 4))
-    elements.append(Paragraph("All installments for this plan have been completed successfully.", center))
-    elements.append(Spacer(1, 6))
+    elements.append(Paragraph("-" * 32, center))
+    elements.append(Paragraph("<b>Status: FULLY PAID</b>", center))
+    elements.append(Spacer(1, 4))
     elements.append(Paragraph("Thank you!", center))
-    elements.append(Paragraph("Final payment completed receipt", center))
 
     doc.build(elements)
     return str(pdf_path)
@@ -397,7 +381,7 @@ def completed_plans_for_receipts(search: str = ""):
 
 
 # ==========================================================
-# LIST RECEIPTS (for UI)
+# LIST RECEIPTS
 # ==========================================================
 def list_receipts(search: str = ""):
     conn = connect()

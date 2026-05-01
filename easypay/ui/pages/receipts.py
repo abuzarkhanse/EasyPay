@@ -61,7 +61,6 @@ class ReceiptsPage(QWidget):
         self.table.setAlternatingRowColors(True)
         root.addWidget(self.table, 1)
 
-        # hide internal ID column from user
         self.table.setColumnHidden(7, True)
 
         self.search.textChanged.connect(self.refresh)
@@ -71,10 +70,15 @@ class ReceiptsPage(QWidget):
 
         self.refresh()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
     def _parse_date(self, value: str):
         value = (value or "").strip()
         if not value:
             return datetime.min
+
         try:
             return datetime.fromisoformat(value)
         except Exception:
@@ -93,6 +97,7 @@ class ReceiptsPage(QWidget):
 
         for row in normal_receipts:
             pdf_path = str(row.get("pdf_path", ""))
+
             all_rows.append({
                 "receipt_type": row.get("receipt_type", "Installment"),
                 "display_no": str(row.get("receipt_no", "")),
@@ -107,6 +112,7 @@ class ReceiptsPage(QWidget):
 
         for row in final_receipts:
             pdf_path = str(row.get("pdf_path", ""))
+
             all_rows.append({
                 "receipt_type": row.get("receipt_type", "Final Completion"),
                 "display_no": str(row.get("plan_number") or f"PLAN-{row.get('plan_id')}"),
@@ -147,8 +153,14 @@ class ReceiptsPage(QWidget):
         if row_index < 0:
             return None
 
-        internal_id = self.table.item(row_index, 7).text()
-        receipt_type = self.table.item(row_index, 0).text()
+        internal_id_item = self.table.item(row_index, 7)
+        receipt_type_item = self.table.item(row_index, 0)
+
+        if not internal_id_item or not receipt_type_item:
+            return None
+
+        internal_id = internal_id_item.text()
+        receipt_type = receipt_type_item.text()
 
         search_text = self.search.text().strip()
         normal_receipts = list_receipts(search_text)
@@ -192,6 +204,7 @@ class ReceiptsPage(QWidget):
             elif receipt_type == "Final Completion":
                 if not internal_id.startswith("PLAN:"):
                     raise ValueError("Invalid final receipt plan ID.")
+
                 plan_id = int(internal_id.split(":", 1)[1])
                 path = generate_final_completion_receipt(plan_id)
 

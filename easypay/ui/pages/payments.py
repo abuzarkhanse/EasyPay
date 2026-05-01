@@ -97,20 +97,16 @@ class PaymentsPage(QWidget):
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(14)
 
-        # ---------------- SEARCH ----------------
         header = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search customer by name, phone or CNIC...")
         header.addWidget(self.search)
         root.addLayout(header)
 
-        # ---------------- MAIN SPLITTER ----------------
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter, 1)
 
-        # ======================================================
-        # LEFT SIDE: CUSTOMER LIST
-        # ======================================================
+        # ---------------- LEFT: CUSTOMERS ----------------
         left_box = QGroupBox("Customers")
         left_layout = QVBoxLayout(left_box)
 
@@ -131,9 +127,7 @@ class PaymentsPage(QWidget):
         left_layout.addWidget(self.customer_table)
         splitter.addWidget(left_box)
 
-        # ======================================================
-        # RIGHT SIDE: SUMMARY + INSTALLMENTS
-        # ======================================================
+        # ---------------- RIGHT: DETAILS ----------------
         right_box = QWidget()
         right_layout = QVBoxLayout(right_box)
         right_layout.setSpacing(12)
@@ -142,7 +136,6 @@ class PaymentsPage(QWidget):
         self.customer_title.setStyleSheet("font-size:16px; font-weight:700;")
         right_layout.addWidget(self.customer_title)
 
-        # ---------------- SUMMARY ----------------
         summary_box = QGroupBox("Customer Payment Summary")
         summary_grid = QGridLayout(summary_box)
 
@@ -156,28 +149,21 @@ class PaymentsPage(QWidget):
 
         summary_grid.addWidget(QLabel("Total Plans"), 0, 0)
         summary_grid.addWidget(self.lbl_total_plans, 0, 1)
-
         summary_grid.addWidget(QLabel("Total Installments"), 0, 2)
         summary_grid.addWidget(self.lbl_total_installments, 0, 3)
-
         summary_grid.addWidget(QLabel("Paid Installments"), 1, 0)
         summary_grid.addWidget(self.lbl_paid_installments, 1, 1)
-
         summary_grid.addWidget(QLabel("Unpaid Installments"), 1, 2)
         summary_grid.addWidget(self.lbl_unpaid_installments, 1, 3)
-
         summary_grid.addWidget(QLabel("Total Payable"), 2, 0)
         summary_grid.addWidget(self.lbl_total_payable, 2, 1)
-
         summary_grid.addWidget(QLabel("Total Paid"), 2, 2)
         summary_grid.addWidget(self.lbl_total_paid, 2, 3)
-
         summary_grid.addWidget(QLabel("Remaining Amount"), 3, 0)
         summary_grid.addWidget(self.lbl_remaining_amount, 3, 1)
 
         right_layout.addWidget(summary_box)
 
-        # ---------------- BUTTONS ----------------
         btn_row = QHBoxLayout()
         self.btn_pay = QPushButton("Add Payment")
         self.btn_edit = QPushButton("Edit Last Payment")
@@ -186,7 +172,6 @@ class PaymentsPage(QWidget):
         btn_row.addWidget(self.btn_edit)
         right_layout.addLayout(btn_row)
 
-        # ---------------- INSTALLMENTS TABLE ----------------
         installments_box = QGroupBox("Customer Installments")
         installments_layout = QVBoxLayout(installments_box)
 
@@ -209,10 +194,9 @@ class PaymentsPage(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
 
-        # Hide technical columns
-        self.table.setColumnHidden(0, True)   # Installment ID
-        self.table.setColumnHidden(10, True)  # Plan ID
-        self.table.setColumnHidden(11, True)  # Last Payment ID
+        self.table.setColumnHidden(0, True)
+        self.table.setColumnHidden(10, True)
+        self.table.setColumnHidden(11, True)
 
         installments_layout.addWidget(self.table)
         right_layout.addWidget(installments_box, 1)
@@ -220,12 +204,16 @@ class PaymentsPage(QWidget):
         splitter.addWidget(right_box)
         splitter.setSizes([320, 900])
 
-        # ---------------- CONNECTIONS ----------------
         self.search.textChanged.connect(self.refresh_customers)
         self.customer_table.itemSelectionChanged.connect(self._on_customer_changed)
         self.btn_pay.clicked.connect(self.pay)
         self.btn_edit.clicked.connect(self.edit_last_payment)
 
+        self.refresh_customers()
+
+    # ======================================================
+    def showEvent(self, event):
+        super().showEvent(event)
         self.refresh_customers()
 
     # ======================================================
@@ -399,6 +387,10 @@ class PaymentsPage(QWidget):
             return
 
         remaining = max(selected["remaining"], 0.0)
+
+        if remaining <= 0:
+            QMessageBox.information(self, "Already Paid", "This installment is already fully paid.")
+            return
 
         dlg = PaymentDialog("Add Payment", default_amount=remaining)
 
